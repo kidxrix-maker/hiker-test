@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Tiny Hiker 등산 키우기</title>
+<link href="https://fonts.googleapis.com/css2?family=DotGothic16&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#fdf3d7;--ink:#2b2b2b;--panel:#fffaf0;--line:#2b2b2b;--btn:#ffd36b;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--bg:#1d2a22;--ink:#f1ead2;--panel:#2a3b30;--line:#f1ead2;--btn:#c99a2e}}
+:root[data-theme="dark"]{--bg:#1d2a22;--ink:#f1ead2;--panel:#2a3b30;--line:#f1ead2;--btn:#c99a2e}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{margin:0;padding:12px;background:var(--bg);color:var(--ink);font-family:'DotGothic16','Malgun Gothic',sans-serif;text-align:center}
+h1{margin:6px 0;font-size:1.6rem}
+canvas{image-rendering:pixelated;width:100%;display:block;margin:0 auto;border:4px solid var(--line);background:#000}
+#mapC{max-width:420px}
+#stage{position:relative;max-width:640px;margin:0 auto}
+#stage canvas{max-width:640px}
+#bubble{position:absolute;display:none;background:#fff;color:#222;border:3px solid #222;padding:4px 8px;font-size:.95rem;transform:translate(-50%,-100%);white-space:nowrap}
+button{font-family:inherit;font-size:1rem;background:var(--btn);color:#2b2b2b;border:3px solid var(--line);padding:6px 12px;margin:4px;cursor:pointer;box-shadow:3px 3px 0 var(--line)}
+button:active{box-shadow:none;transform:translate(3px,3px)}
+.panel{max-width:360px;margin:10px auto;padding:10px;background:var(--panel);border:3px solid var(--line)}
+#hud{max-width:640px;margin:8px auto;display:flex;gap:10px;align-items:center;justify-content:center;flex-wrap:wrap}
+#barWrap{width:140px;height:14px;border:3px solid var(--line);background:var(--panel)}
+#bar{height:100%;width:0;background:#4aa3ff}
+small{opacity:.7}
+#chips{max-width:420px;margin:8px auto;max-height:130px;overflow-y:auto;padding:6px;border:3px solid var(--line);background:var(--panel)}
+#chips button{font-size:.85rem;padding:3px 7px;margin:2px;box-shadow:2px 2px 0 var(--line)}
+</style>
+</head>
+<body>
+<h1>⛰ Tiny Hiker</h1>
+
+<div id="mapView">
+  <canvas id="mapC" width="210" height="356"></canvas>
+  <div class="panel">
+    <b id="cardName">산을 골라보세요</b>
+    <div id="cardInfo">지도의 빨간 점을 눌러요 🔴</div>
+    <button id="go" style="display:none">올라가기!</button>
+  </div>
+  <div id="chips"></div>
+  <small>높이와 위치는 대략적인 값 · 노란 산 = 정상 완료</small>
+</div>
+
+<div id="hikeView" style="display:none">
+  <h2 id="hikeTitle"></h2>
+  <div id="stage">
+    <canvas id="hikeC" width="160" height="100"></canvas>
+    <div id="bubble"></div>
+  </div>
+  <div id="hud">
+    <span id="water"></span>
+    <span>목마름 <span id="barWrap" style="display:inline-block;vertical-align:middle"><div id="bar"></div></span></span>
+    <span id="alt"></span>
+  </div>
+  <div>
+    <button id="giveBtn">💧 물 주기</button>
+    <button onclick="setSeason(0)">🌸</button><button onclick="setSeason(1)">☀️</button><button onclick="setSeason(2)">🍁</button><button onclick="setSeason(3)">❄️</button>
+    <button id="soundBtn">🔊</button>
+    <button id="retry" style="display:none">다시 도전</button>
+    <button id="back">← 지도</button>
+  </div>
+  <small>새나 다람쥐를 눌러보세요</small>
+</div>
+
+<script>
+var $ = function(id){ return document.getElementById(id); };
+var mc = $("mapC").getContext("2d");
+var hc = $("hikeC").getContext("2d");
+var done = {}, sel = null, soundOn = true, AC = null;
+
+// ---------- sound (tiny beeps, no files needed) ----------
+function beep(f, d, type, v){
+  if(!soundOn) return;
+  try{
+    if(!AC) AC = new (window.AudioContext || window.webkitAudioContext)();
+    if(AC.state === "suspended") AC.resume();
+    var o = AC.createOscillator(), g = AC.createGain();
+    o.type = type || "square"; o.frequency.value = f; g.gain.value = v || 0.05;
+    o.connect(g); g.connect(AC.destination); o.start();
+    g.gain.exponentialRampToValueAtTime(0.0001, AC.currentTime + d);
+    o.stop(AC.currentTime + d);
+  }catch(e){}
+}
+function seq(notes, gap, type){ notes.forEach(function(n, i){ setTimeout(function(){ beep(n, gap*1.5/1000, type); }, i*gap); }); }
+function glug(){ seq([300,380,300,380], 110, "triangle"); }
+function fanfare(){ seq([523,659,784,1047], 130); }
+function chirp(){ seq([1400,1800], 80, "sine"); }
+
+// ---------- data ----------
+// name, height(m), region, longitude, latitude, [pixel nudge x, y]
+var raw = [
+  ["한라산",1947,"제주",126.533,33.362],["지리산",1915,"경남·전남·전북",127.730,35.337],
+  ["설악산",1708,"강원",128.465,38.119],["덕유산",1614,"전북·경남",127.746,35.859],
+  ["태백산",1567,"강원·경북",128.917,37.096],["오대산",1563,"강원",128.543,37.798],
+  ["가리왕산",1562,"강원",128.543,37.456],["소백산",1439,"충북·경북",128.485,36.956],
+  ["가야산",1430,"경남·경북",128.117,35.824],["치악산",1288,"강원",128.052,37.365],
+  ["명지산",1267,"경기",127.508,37.992],["가지산",1241,"울산·경남",129.026,35.627],
+  ["팔공산",1193,"대구·경북",128.693,35.998],["무등산",1187,"광주·전남",126.988,35.134],
+  ["용문산",1157,"경기",127.587,37.545],["월악산",1097,"충북",128.105,36.885],
+  ["비슬산",1084,"대구",128.516,35.693],["속리산",1058,"충북·경북",127.877,36.541],
+  ["금오산",977,"경북",128.307,36.098],["조계산",887,"전남",127.356,35.003],
+  ["대둔산",878,"전북·충남",127.328,36.131],["계룡산",845,"충남·대전",127.205,36.341],
+  ["북한산",836,"서울·경기",126.977,37.659,-4,-1],["월출산",809,"전남",126.699,34.757],
+  ["금정산",802,"부산",129.050,35.285],["내장산",763,"전북·전남",126.889,35.484],
+  ["도봉산",740,"서울·경기",127.016,37.699,4,-3],["주왕산",721,"경북",129.147,36.395],
+  ["감악산",675,"경기",126.969,37.939],["삼악산",654,"강원",127.650,37.880],
+  ["관악산",632,"서울·경기",126.964,37.444],["마니산",472,"인천",126.428,37.612],
+  ["남산",262,"서울",126.988,37.551]
+];
+var mountains = raw.map(function(a){
+  return {n:a[0], h:a[1], r:a[2], x:Math.round((a[3]-125.6)*48+6+(a[5]||0)), y:Math.round((38.8-a[4])*60+4+(a[6]||0))};
+});
+
+// ---------- map screen ----------
+var base = document.createElement("canvas"); base.width = 210; base.height = 356;
+(function(){
+  var b = base.getContext("2d");
+  var ll = [[126.68,37.78],[126.25,37.72],[126.25,37.50],[126.55,37.45],[126.70,37.20],[126.85,37.10],[126.80,36.90],[126.40,36.95],[126.15,36.85],[126.20,36.65],[126.50,36.40],[126.55,36.00],[126.45,35.75],[126.30,35.60],[126.50,35.40],[126.40,35.15],[126.30,34.85],[126.35,34.55],[126.55,34.30],[126.85,34.40],[127.15,34.55],[127.45,34.45],[127.60,34.65],[127.80,34.70],[128.00,34.85],[128.45,34.85],[128.65,34.70],[128.75,35.05],[129.05,35.00],[129.30,35.30],[129.45,35.55],[129.45,35.95],[129.40,36.40],[129.45,36.80],[129.40,37.05],[129.20,37.30],[129.10,37.50],[128.95,37.75],[128.60,38.20],[128.37,38.62],[128.00,38.30],[127.40,38.30],[126.90,37.95]];
+  var pts = ll.map(function(a){ return [(a[0]-125.6)*48+6, (38.8-a[1])*60+4]; });
+  b.fillStyle = "#6fbf5f"; b.beginPath(); b.moveTo(pts[0][0], pts[0][1]);
+  for(var i = 1; i < pts.length; i++) b.lineTo(pts[i][0], pts[i][1]);
+  b.closePath(); b.fill();
+  b.beginPath(); b.ellipse(52, 329, 19, 11, 0, 0, Math.PI*2); b.fill();
+  // remove blurry edges so it looks like real pixels
+  var W = 210, H = 356;
+  var im = b.getImageData(0, 0, W, H), d = im.data;
+  for(var k = 3; k < d.length; k += 4) d[k] = d[k] > 100 ? 255 : 0;
+  // dark pixel outline around the land
+  var o = [];
+  for(var y = 1; y < H-1; y++) for(var x = 1; x < W-1; x++){
+    var i = (y*W + x) * 4;
+    if(d[i+3] === 0 && (d[i-1] || d[i+7] || d[i-W*4+3] || d[i+W*4+3])) o.push(i);
+  }
+  o.forEach(function(i){ d[i] = 61; d[i+1] = 122; d[i+2] = 61; d[i+3] = 255; });
+  b.putImageData(im, 0, 0);
+  // darker green blocks along the Taebaek / Jiri mountain ridge
+  b.globalCompositeOperation = "source-atop"; b.fillStyle = "#5fae5a";
+  var rg = [[128.5,38.1],[128.9,37.1],[128.6,36.4],[128.1,35.8],[127.7,35.35]];
+  for(var q = 0; q < rg.length-1; q++) for(var s = 0; s < 40; s++){
+    var t = s/40;
+    var rx = (rg[q][0] + (rg[q+1][0]-rg[q][0])*t - 125.6)*48 + 6, ry = (38.8 - (rg[q][1] + (rg[q+1][1]-rg[q][1])*t))*60 + 4;
+    b.fillRect(Math.round(rx) - 2 + (s%3), Math.round(ry) - 2, 4, 4);
+  }
+  b.globalCompositeOperation = "destination-over";
+  b.fillStyle = "#b8e6ff";                                  // little waves
+  for(var wy = 10, rw = 0; wy < 356; wy += 22, rw++) for(var wx = 5 + (rw%2)*14; wx < 210; wx += 28){ b.fillRect(wx, wy, 5, 1); b.fillRect(wx+5, wy-1, 3, 1); }
+  b.fillStyle = "#8ed1fc"; b.fillRect(0, 0, 210, 356);
+})();
+
+var chipBtns = [];
+function tri(c, x, y, col){                                   // tiny pixel mountain icon
+  c.fillStyle = "#2b2b2b";
+  for(var r = 0; r < 4; r++) c.fillRect(x - r - 1, y - 3 + r, 2*r + 3, 1);
+  c.fillStyle = col;
+  for(var r2 = 0; r2 < 3; r2++) c.fillRect(x - r2 - 1, y - 2 + r2, 2*r2 + 3, 1);
+}
+function drawMap(){
+  mc.drawImage(base, 0, 0);
+  mountains.forEach(function(m){
+    tri(mc, m.x, m.y, done[m.n] ? "#ffd23f" : "#e0453a");
+    if(m === sel){ mc.fillStyle = "#2b2b2b"; mc.fillRect(m.x-2, m.y-11, 5, 5); mc.fillStyle = "#fff"; mc.fillRect(m.x-1, m.y-10, 3, 3); }
+  });
+  chipBtns.forEach(function(b){ b.innerHTML = b.m.n + " " + b.m.h + "m" + (done[b.m.n] ? " 🚩" : ""); });
+}
+$("mapC").onclick = function(e){
+  var r = this.getBoundingClientRect();
+  var x = (e.clientX - r.left) / r.width * 210, y = (e.clientY - r.top) / r.height * 356;
+  var best = null, bd = 9;
+  mountains.forEach(function(m){ var d = Math.hypot(m.x-x, m.y-y); if(d < bd){ bd = d; best = m; } });
+  if(best) pick(best);
+};
+function pick(m){
+  sel = m;
+  $("cardName").innerHTML = m.n + (done[m.n] ? " 🚩" : "");
+  $("cardInfo").innerHTML = "높이 " + m.h + "m · " + m.r;
+  $("go").style.display = "inline-block";
+  drawMap(); beep(660, .08);
+}
+// list under the map, tallest first (easier than tapping crowded dots)
+mountains.slice().sort(function(a, b){ return b.h - a.h; }).forEach(function(m){
+  var bt = document.createElement("button"); bt.m = m; bt.onclick = function(){ pick(m); };
+  $("chips").appendChild(bt); chipBtns.push(bt);
+});
+
+// ---------- hiking screen ----------
+var seasons = [
+  {sky:"#bfe9ff", m1:"#7fae6a", m2:"#6a9958", g:"#8fcf7a", t:["#5aa850"], cap:"#cfcfcf", p:"#ffb7d5"},
+  {sky:"#6ec6ff", m1:"#3f8f4a", m2:"#33793d", g:"#4aa84f", t:["#2e7d32"], cap:"#cfcfcf", p:null},
+  {sky:"#ffd9a0", m1:"#c9803a", m2:"#a9662c", g:"#c98b3c", t:["#e0612a","#f2a53a"], cap:"#d9d0c0", p:"#e0612a"},
+  {sky:"#cfe3f2", m1:"#b6c4d2", m2:"#9aabbb", g:"#eef4fa", t:["#3d6b4f"], cap:"#ffffff", p:"#ffffff"}
+];
+var S = 0;
+function setSeason(i){ S = i; beep(500 + i*100, .08); }
+
+var path = [[20,90],[110,82],[40,72],[112,62],[55,52],[95,42],[70,33],[80,20]];
+var segLen = [], total = 0;
+for(var i = 0; i < path.length-1; i++){
+  var L = Math.hypot(path[i+1][0]-path[i][0], path[i+1][1]-path[i][1]);
+  segLen.push(L); total += L;
+}
+function where(p){
+  var d = p * total;
+  for(var i = 0; i < segLen.length; i++){
+    if(d <= segLen[i] || i === segLen.length-1){
+      var t = Math.min(1, d / segLen[i]);
+      return {x: path[i][0] + (path[i+1][0]-path[i][0])*t, y: path[i][1] + (path[i+1][1]-path[i][1])*t, dir: path[i+1][0] >= path[i][0] ? 1 : -1};
+    }
+    d -= segLen[i];
+  }
+}
+
+var G = {m:null, p:0, thirst:0, water:0, st:"idle", T:20, rate:8, tm:0, step:0, frame:0, drinkT:0};
+var trees = [[8,92],[20,86],[30,93],[130,90],[142,95],[152,86],[118,94],[60,95],[100,96]];
+var parts = []; for(var i = 0; i < 30; i++) parts.push({x:Math.random()*160, y:Math.random()*100, s:6+Math.random()*8});
+var bird = {on:false, x:-10, y:20, next:3};
+var sq = {x:112, y:96, j:0};
+var last = performance.now();
+
+function say(t){ $("bubble").style.display = t ? "block" : "none"; $("bubble").innerHTML = t; }
+
+$("go").onclick = function(){
+  var m = sel; G.m = m;
+  G.T = 15 + m.h/80; G.rate = 6 + m.h/300;           // taller mountain = longer + thirstier
+  G.water = Math.ceil(G.T * G.rate / 100) + 1;        // limited water
+  G.p = 0; G.thirst = 0; G.st = "climb";
+  $("mapView").style.display = "none"; $("hikeView").style.display = "block";
+  $("retry").style.display = "none"; $("hikeTitle").innerHTML = m.n + " " + m.h + "m";
+  say(""); beep(523, .1); last = performance.now();
+};
+$("retry").onclick = $("go").onclick;
+$("back").onclick = function(){
+  G.st = "idle"; $("hikeView").style.display = "none"; $("mapView").style.display = "block";
+  $("cardName").innerHTML = sel.n + (done[sel.n] ? " 🚩" : ""); drawMap();
+};
+$("soundBtn").onclick = function(){ soundOn = !soundOn; this.innerHTML = soundOn ? "🔊" : "🔇"; };
+$("giveBtn").onclick = function(){
+  if((G.st === "climb" || G.st === "thirsty") && G.water > 0){
+    G.water--; G.thirst = 0; G.st = "drink"; G.drinkT = 0.9; say("꿀꺽꿀꺽! 💧"); glug();
+  }
+};
+$("hikeC").onclick = function(e){
+  var r = this.getBoundingClientRect();
+  var x = (e.clientX - r.left) / r.width * 160, y = (e.clientY - r.top) / r.height * 100;
+  if(bird.on && Math.hypot(bird.x - x, bird.y - y) < 12) chirp();
+  else if(Math.hypot(sq.x - x, sq.y - y) < 10){ sq.j = 0.4; chirp(); }
+};
+
+function update(dt){
+  G.tm += dt;
+  if(G.st === "climb"){
+    G.p += dt / G.T; G.thirst += G.rate * dt;
+    G.step += dt;
+    if(G.step > 0.25){ G.step = 0; G.frame = 1 - G.frame; beep(120, .05, "square", 0.03); }
+    if(G.p >= 1){
+      G.p = 1; G.st = "summit"; done[G.m.n] = true; say("정상이다! 야호~ 🚩"); fanfare();
+    } else if(G.thirst >= 100){
+      G.thirst = 100;
+      if(G.water > 0){ G.st = "thirsty"; say("목말라요... 💧 물 주세요!"); beep(300, .2, "triangle"); }
+      else { G.st = "fail"; say("물이 없어요... 내려갈래요 😢"); $("retry").style.display = "inline-block"; }
+    }
+  } else if(G.st === "drink"){
+    G.drinkT -= dt; if(G.drinkT <= 0){ G.st = "climb"; say(""); }
+  }
+  if(seasons[S].p) parts.forEach(function(p, i){
+    p.y += p.s * dt; p.x += Math.sin(G.tm + i) * 6 * dt;
+    if(p.y > 100){ p.y = 0; p.x = Math.random() * 160; }
+  });
+  if(!bird.on){ bird.next -= dt; if(bird.next <= 0){ bird.on = true; bird.x = -8; bird.y = 14 + Math.random()*20; } }
+  else { bird.x += 30 * dt; if(bird.x > 170){ bird.on = false; bird.next = 6 + Math.random()*6; } }
+  if(sq.j > 0) sq.j = Math.max(0, sq.j - dt);
+  $("water").innerHTML = "💧 x" + G.water;
+  $("bar").style.width = Math.round(G.thirst) + "%";
+  $("bar").style.background = G.thirst > 70 ? "#e0453a" : "#4aa3ff";
+  $("alt").innerHTML = "⛰ " + Math.round(G.p * G.m.h) + "m / " + G.m.h + "m";
+}
+
+function tree(c, x, y, col, snow, blossom){
+  c.fillStyle = "#6b4a2b"; c.fillRect(x, y-4, 2, 4);
+  c.fillStyle = col;
+  for(var i = 0; i < 5; i++){ var w = 2*i + 3; c.fillRect(x + 1 - Math.floor(w/2), y - 14 + i*2, w, 2); }
+  if(snow){ c.fillStyle = "#fff"; c.fillRect(x, y-14, 3, 1); c.fillRect(x-1, y-12, 5, 1); }
+  if(blossom){ c.fillStyle = "#ffb7d5"; c.fillRect(x-1, y-8, 1, 1); c.fillRect(x+3, y-6, 1, 1); c.fillRect(x+1, y-11, 1, 1); }
+}
+
+function hiker(c, x, y, dir, st, fr){
+  x = Math.round(x); y = Math.round(y);
+  var sit = (st === "thirsty" || st === "fail"), yy = sit ? y + 1 : y;
+  c.fillStyle = "#2f8f4e"; c.fillRect(dir > 0 ? x-4 : x+3, yy-6, 2, 3);          // backpack
+  c.fillStyle = "#4a3b2a";                                                         // legs
+  if(sit) c.fillRect(x-3, yy-2, 7, 2);
+  else { c.fillRect(x-2, yy-2, 2, fr ? 2 : 1); c.fillRect(x+1, yy-2, 2, fr ? 1 : 2); }
+  c.fillStyle = "#3a6fd8"; c.fillRect(x-2, yy-5, 5, 3);                            // body
+  c.fillStyle = "#f5c9a0"; c.fillRect(x-2, yy-8, 5, 3);                            // head
+  c.fillStyle = "#e0453a"; c.fillRect(x-3, yy-10, 7, 2); c.fillRect(x-2, yy-11, 5, 1); // hat
+  c.fillStyle = "#222"; c.fillRect(x-1, yy-7, 1, 1); c.fillRect(x+1, yy-7, 1, 1);
+  if(sit || G.thirst > 70){ c.fillStyle = "#5ec8ff"; c.fillRect(x+3, yy-8, 1, 2); }  // sweat
+  if(st === "drink"){ c.fillStyle = "#5ec8ff"; c.fillRect(x+3, yy-9, 2, 4); }       // bottle
+}
+
+function draw(){
+  var s = seasons[S], c = hc;
+  c.fillStyle = s.sky; c.fillRect(0, 0, 160, 100);
+  for(var i = 0; i < 3; i++){
+    var cx = ((G.tm*4 + i*60) % 200) - 30, cy = 10 + i*9;
+    c.fillStyle = "#fff"; c.fillRect(cx, cy, 14, 3); c.fillRect(cx+3, cy-2, 8, 2);
+  }
+  for(var y = 18; y <= 95; y++){                                   // mountain, row by row
+    var half = Math.round((y-18) * 80/77);
+    c.fillStyle = y < 24 ? s.cap : s.m1; c.fillRect(80-half, y, half, 1);
+    c.fillStyle = y < 24 ? s.cap : s.m2; c.fillRect(80, y, half+1, 1);
+  }
+  c.fillStyle = s.g; c.fillRect(0, 95, 160, 5);
+  c.fillStyle = "#f3e2b3";                                          // dotted trail
+  for(var j = 0; j < segLen.length; j++){
+    for(var k = 0; k < segLen[j]; k += 3){
+      var t = k / segLen[j];
+      c.fillRect(Math.round(path[j][0] + (path[j+1][0]-path[j][0])*t), Math.round(path[j][1] + (path[j+1][1]-path[j][1])*t), 1, 1);
+    }
+  }
+  trees.forEach(function(t, n){ tree(c, t[0], t[1], s.t[n % s.t.length], S === 3, S === 0); });
+  if(S === 0){ for(var f = 0; f < 22; f++){ c.fillStyle = f % 2 ? "#ffb7d5" : "#fff27a"; c.fillRect((f*37) % 160, 96 + (f % 3), 1, 1); } }
+  if(done[G.m.n] || G.st === "summit"){ c.fillStyle = "#555"; c.fillRect(80, 9, 1, 10); c.fillStyle = "#e0453a"; c.fillRect(81, 9, 5, 3); }
+  var off = sq.j > 0 ? -Math.round(Math.sin(sq.j/0.4*Math.PI) * 5) : 0;     // squirrel
+  c.fillStyle = "#a0642a"; c.fillRect(sq.x, sq.y-3+off, 4, 3); c.fillRect(sq.x+4, sq.y-6+off, 2, 4); c.fillRect(sq.x-1, sq.y-4+off, 2, 2);
+  if(bird.on){                                                              // bird
+    var by = Math.round(bird.y + Math.sin(bird.x/5) * 2), fl = Math.floor(G.tm*6) % 2;
+    c.fillStyle = "#333"; c.fillRect(Math.round(bird.x), by, 3, 1);
+    if(fl){ c.fillRect(Math.round(bird.x)-1, by-1, 1, 1); c.fillRect(Math.round(bird.x)+3, by-1, 1, 1); }
+    else { c.fillRect(Math.round(bird.x)-1, by+1, 1, 1); c.fillRect(Math.round(bird.x)+3, by+1, 1, 1); }
+  }
+  var pos = where(G.p);
+  hiker(c, pos.x, pos.y, pos.dir, G.st, G.frame);
+  if(s.p){ c.fillStyle = s.p; parts.forEach(function(p){ c.fillRect(Math.round(p.x), Math.round(p.y), 2, S === 3 ? 2 : 1); }); }
+  var b = $("bubble"); b.style.left = (pos.x/160*100) + "%"; b.style.top = ((pos.y-13)/100*100) + "%";
+}
+
+function loop(now){
+  var dt = Math.min(0.1, (now - last) / 1000); last = now;
+  if(G.m && $("hikeView").style.display === "block"){ update(dt); draw(); }
+  requestAnimationFrame(loop);
+}
+drawMap();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
